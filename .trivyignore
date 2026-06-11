@@ -1,5 +1,11 @@
 # Trivy CVE allowlist
 # Add CVE IDs here (one per line) to suppress known/accepted vulnerabilities.
 # Always document why a CVE is accepted before adding it.
-# Example:
-#   CVE-2023-XXXXX  # accepted: no fix available, mitigated by network policy
+
+# genai-service: tomcat-embed-core 11.0.15 and spring-boot 4.0.1 have known CVEs.
+# Fix available: upgrade Spring Boot parent to 4.0.6 (pulls Tomcat 11.0.22).
+# Reported to dev team — accepted risk in dev environment until upstream upgrade.
+CVE-2026-41293
+CVE-2026-43512
+CVE-2026-43515
+CVE-2026-40976
