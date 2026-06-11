@@ -82,6 +82,9 @@ jobs:
   setup:
     needs: changes
     if: needs.changes.outputs.any_changed == 'true'
+    permissions:
+      id-token: write
+      contents: read
     uses: ./.github/workflows/reusable-ecr-login.yml
     with:
       aws-region: us-east-1
