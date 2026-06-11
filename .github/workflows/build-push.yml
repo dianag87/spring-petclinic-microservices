@@ -1,0 +1,186 @@
+name: Build and Push
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  # ─── 1. Detect which services changed ────────────────────────────────────────
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      any_changed: ${{ steps.matrix.outputs.any_changed }}
+      matrix:      ${{ steps.matrix.outputs.matrix }}
+      services:    ${{ steps.matrix.outputs.services }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect changed service directories
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            config_server:
+              - 'spring-petclinic-config-server/**'
+            discovery_server:
+              - 'spring-petclinic-discovery-server/**'
+            api_gateway:
+              - 'spring-petclinic-api-gateway/**'
+            customers_service:
+              - 'spring-petclinic-customers-service/**'
+            visits_service:
+              - 'spring-petclinic-visits-service/**'
+            vets_service:
+              - 'spring-petclinic-vets-service/**'
+            genai_service:
+              - 'spring-petclinic-genai-service/**'
+            admin_server:
+              - 'spring-petclinic-admin-server/**'
+
+      - name: Build matrix and services list
+        id: matrix
+        env:
+          CONFIG_SERVER:    ${{ steps.filter.outputs.config_server }}
+          DISCOVERY_SERVER: ${{ steps.filter.outputs.discovery_server }}
+          API_GATEWAY:      ${{ steps.filter.outputs.api_gateway }}
+          CUSTOMERS:        ${{ steps.filter.outputs.customers_service }}
+          VISITS:           ${{ steps.filter.outputs.visits_service }}
+          VETS:             ${{ steps.filter.outputs.vets_service }}
+          GENAI:            ${{ steps.filter.outputs.genai_service }}
+          ADMIN:            ${{ steps.filter.outputs.admin_server }}
+        run: |
+          INCLUDE=()
+          SERVICES=()
+
+          add() {
+            local svc="$1" mod="$2"
+            INCLUDE+=("{\"service\":\"${svc}\",\"maven_module\":\"${mod}\"}")
+            SERVICES+=("${svc}")
+          }
+
+          [[ "$CONFIG_SERVER"    == "true" ]] && add "config-server"    "spring-petclinic-config-server"
+          [[ "$DISCOVERY_SERVER" == "true" ]] && add "discovery-server" "spring-petclinic-discovery-server"
+          [[ "$API_GATEWAY"      == "true" ]] && add "api-gateway"      "spring-petclinic-api-gateway"
+          [[ "$CUSTOMERS"        == "true" ]] && add "customers-service" "spring-petclinic-customers-service"
+          [[ "$VISITS"           == "true" ]] && add "visits-service"   "spring-petclinic-visits-service"
+          [[ "$VETS"             == "true" ]] && add "vets-service"     "spring-petclinic-vets-service"
+          [[ "$GENAI"            == "true" ]] && add "genai-service"    "spring-petclinic-genai-service"
+          [[ "$ADMIN"            == "true" ]] && add "admin-server"     "spring-petclinic-admin-server"
+
+          if [[ ${#INCLUDE[@]} -eq 0 ]]; then
+            echo "any_changed=false" >> "$GITHUB_OUTPUT"
+            echo "matrix={\"include\":[]}"  >> "$GITHUB_OUTPUT"
+            echo "services="                >> "$GITHUB_OUTPUT"
+          else
+            JOINED=$(IFS=,; echo "${INCLUDE[*]}")
+            echo "any_changed=true"                       >> "$GITHUB_OUTPUT"
+            echo "matrix={\"include\":[${JOINED}]}"       >> "$GITHUB_OUTPUT"
+            echo "services=${SERVICES[*]}"                >> "$GITHUB_OUTPUT"
+          fi
+
+  # ─── 2. Resolve ECR registry URL (reusable) ──────────────────────────────────
+  setup:
+    needs: changes
+    if: needs.changes.outputs.any_changed == 'true'
+    uses: ./.github/workflows/reusable-ecr-login.yml
+    with:
+      aws-region: us-east-1
+    secrets:
+      role-arn: ${{ secrets.AWS_ROLE_ARN }}
+
+  # ─── 3. Build, scan, and push each changed service ───────────────────────────
+  build:
+    needs: [changes, setup]
+    if: needs.changes.outputs.any_changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    strategy:
+      matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
+      fail-fast: false
+    env:
+      REGISTRY: ${{ needs.setup.outputs.registry }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+
+      - name: Set up QEMU (ARM64 cross-compilation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Each matrix job needs its own Docker auth — Docker state is runner-scoped
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region:     ${{ secrets.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build ARM64 image with Maven
+        run: |
+          ./mvnw clean install -P buildDocker \
+            -Dcontainer.platform=linux/arm64 \
+            -pl ${{ matrix.maven_module }} -am \
+            --no-transfer-progress
+
+      - name: Trivy scan — CRITICAL (gate)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref:     springcommunity/${{ matrix.maven_module }}
+          severity:      CRITICAL
+          exit-code:     '1'
+          format:        table
+          trivyignores:  .trivyignore
+
+      - name: Trivy scan — HIGH (warning only)
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref:    springcommunity/${{ matrix.maven_module }}
+          severity:     HIGH
+          exit-code:    '0'
+          format:       sarif
+          output:       trivy-${{ matrix.service }}.sarif
+          trivyignores: .trivyignore
+
+      - name: Upload Trivy results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-results-${{ matrix.service }}
+          path: trivy-${{ matrix.service }}.sarif
+
+      - name: Tag and push to ECR
+        env:
+          SERVICE: ${{ matrix.service }}
+          MODULE:  ${{ matrix.maven_module }}
+          SHA7:    ${{ github.sha }}
+        run: |
+          SHA7="${SHA7::7}"
+          TARGET="${REGISTRY}/petclinic-dev/${SERVICE}:${SHA7}"
+          docker tag "springcommunity/${MODULE}" "${TARGET}"
+          docker push "${TARGET}"
+          echo "Pushed ${TARGET}"
+
+  # ─── 4. Notify platform repo to update Helm values ───────────────────────────
+  notify:
+    needs: [changes, build]
+    if: needs.changes.outputs.any_changed == 'true'
+    uses: ./.github/workflows/reusable-update-tags.yml
+    with:
+      sha:          ${{ github.sha }}
+      services:     ${{ needs.changes.outputs.services }}
+      platform-repo: dianag87/petclinic-platform
+    secrets:
+      platform-repo-token: ${{ secrets.PLATFORM_REPO_TOKEN }}

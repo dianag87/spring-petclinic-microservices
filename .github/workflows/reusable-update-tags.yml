@@ -1,0 +1,45 @@
+name: Reusable Notify Platform Repo
+
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: 7-character commit SHA that was built and pushed
+        required: true
+        type: string
+      services:
+        description: Space-separated list of services that were built (e.g. "customers-service vets-service")
+        required: true
+        type: string
+      platform-repo:
+        description: Platform repo in org/repo format (e.g. dianag87/petclinic-platform)
+        required: true
+        type: string
+    secrets:
+      platform-repo-token:
+        description: GitHub PAT with repo write access to the platform repo
+        required: true
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fire repository_dispatch to platform repo
+        env:
+          TOKEN: ${{ secrets.platform-repo-token }}
+          REPO:  ${{ inputs.platform-repo }}
+          SHA:   ${{ inputs.sha }}
+          SVCS:  ${{ inputs.services }}
+        run: |
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -X POST \
+            -H "Accept: application/vnd.github.v3+json" \
+            -H "Authorization: Bearer ${TOKEN}" \
+            "https://api.github.com/repos/${REPO}/dispatches" \
+            -d "{\"event_type\":\"app-image-built\",\"client_payload\":{\"sha\":\"${SHA}\",\"services\":\"${SVCS}\"}}")
+
+          echo "GitHub API response: ${HTTP_STATUS}"
+          if [[ "${HTTP_STATUS}" != "204" ]]; then
+            echo "Failed to dispatch event (expected 204, got ${HTTP_STATUS})"
+            exit 1
+          fi
