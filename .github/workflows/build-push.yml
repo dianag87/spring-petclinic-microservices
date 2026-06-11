@@ -184,6 +184,6 @@ jobs:
     with:
       sha:          ${{ github.sha }}
       services:     ${{ needs.changes.outputs.services }}
-      platform-repo: dianag87/petclinic-platform
+      platform-repo: ${{ vars.PLATFORM_REPO }}
     secrets:
       platform-repo-token: ${{ secrets.PLATFORM_REPO_TOKEN }}
